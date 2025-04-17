@@ -1,0 +1,1377 @@
+---
+title: "Untitled"
+output:
+  pdf_document: default
+  html_document: default
+date: "2025-03-23"
+---
+### Loading Required Libraries
+
+Before starting any analysis, we load the necessary R packages that provide functions for data processing, modeling, visualization, and evaluation:
+
+- `readr`, `dplyr`, `tidyr`, `lubridate`, `tidyverse` – For **data reading, manipulation, and date handling**.
+- `ggplot2`, `RColorBrewer`, `scales`, `viridisLite` – For **data visualization** and custom color palettes.
+- `forcats` – For **handling categorical variables** (factors).
+- `reshape2` – For **reshaping data** (e.g., melt and cast operations).
+- `car` – Used for **Type II ANOVA** tests on regression models.
+- `stats` – Base R package for **statistical functions** and modeling.
+- `Matrix`, `MatrixModels` – For working with **sparse matrices** in modeling.
+- `glmnet` – For **regularized regression models** (e.g., Lasso and Ridge).
+- `caret` – For **machine learning workflows** (e.g., cross-validation, model tuning).
+- `ROCR`, `pROC` – For **ROC curve plotting and AUC score calculation**.
+- `MLmetrics` – Provides **evaluation metrics** for classification models (e.g., accuracy, F1 score).
+- `broom` – Converts statistical model outputs into **tidy data frames** for easier plotting and reporting.
+
+```{r}
+# Load necessary library
+library(readr)
+library(dplyr)
+library(lubridate)
+library(tidyr)
+library(ggplot2)
+library(forcats)
+library(reshape2)
+library(car)     # For Type II ANOVA
+library(stats)
+library(Matrix)
+library(glmnet)
+library(caret)
+library(ROCR)
+library(MatrixModels)
+library(MLmetrics)
+library(broom)
+library(pROC)
+library(tidyverse)
+library(RColorBrewer)
+library(scales)
+library(viridisLite) 
+```
+
+### Processing Flight Delay CSV Files (2000–2004)
+
+This code cleans and prepares flight delay data files for further analysis:
+
+- Generates file names: `2000.csv`, `2001.csv`, ..., `2004.csv`
+- Defines the required columns to keep
+- Loops through each CSV file:
+  - Tries reading with **UTF-8** encoding  
+  - If it fails, retries with **Latin-1** encoding
+- If all required columns are present:
+  - Keeps only the specified columns  
+  - Removes rows with missing values  
+  - Saves the cleaned data as `<year>_Q2AB.csv`
+- If required columns are missing, it prints a warning
+
+```{r message=FALSE, warning=FALSE}
+# Initialize an empty list to store data frames
+data_list <- list()
+
+# Loop through each year
+for (year in years) {
+  file_name <- paste0(year, "_Q2AB.csv")
+  
+  # Check if file exists
+  if (file.exists(file_name)) {
+    cat("Loading", file_name, "...\n")
+    data_list[[as.character(year)]] <- read_csv(file_name)
+  } else {
+    cat("File", file_name, "not found!\n")
+  }
+}
+
+# Combine all data frames into one
+if (length(data_list) > 0) {
+  combined_data <- bind_rows(data_list)
+  cat("All files successfully loaded and combined!\n")
+  
+  # Save combined data
+  write_csv(combined_data, "Combined_Flight_Data_2000_2004.csv")
+  cat("Combined data saved as 'Combined_Flight_Data_2000_2004.csv'\n")
+} else {
+  cat("No files found.\n")
+}
+```
+###  Load Combined Flight Data
+
+This step reads the merged CSV file `Combined_Flight_Data_2000_2004.csv` into a pandas DataFrame named `df`.  
+This dataset includes cleaned flight records from the years **2000 to 2004**, prepared in the previous steps.
+```{r message=FALSE, warning=FALSE}
+df <- read_csv("Combined_Flight_Data_2000_2004.csv")
+print(df)
+```
+### 🧼 Cleaning and Formatting Flight Data
+
+This section prepares flight data for analysis by selecting key variables and formatting values:
+
+- Selects relevant columns: `Year`, `CRSDepTime`, `DepDelay`, `ArrDelay`, `DayOfWeek`, and `TailNum`
+- Removes duplicate rows
+- Converts `DayOfWeek` from numbers (1–7) to weekday names (Monday–Sunday)
+- Formats `CRSDepTime` from integers like `700` to `"07:00"` using time parsing
+- Prints the number of duplicates detected (should be 0 after removal)
+- Displays the first few rows of the cleaned dataset
+
+```{r message=FALSE, warning=FALSE}
+df_Q2a <- df %>%
+  select(Year, CRSDepTime, DepDelay, ArrDelay, DayOfWeek, TailNum)
+
+# Remove duplicates
+df_Q2a <- df_Q2a %>% distinct()
+
+# Map day numbers to names
+day_mapping <- c("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
+df_Q2a$DayOfWeek <- factor(df_Q2a$DayOfWeek, levels = 1:7, labels = day_mapping)
+
+# Format CRSDepTime (e.g., 700 → "07:00")
+df_Q2a$CRSDepTime <- sprintf("%04d", as.integer(df_Q2a$CRSDepTime))
+df_Q2a$CRSDepTime <- format(parse_time(df_Q2a$CRSDepTime, format = "%H%M"), "%H:%M")
+
+# Count and print number of duplicates 
+num_duplicates <- sum(duplicated(df_Q2a))
+cat("Number of duplicate rows:", num_duplicates, "\n")
+
+# Show first 5 rows
+print(df_Q2a)
+```
+### Preparing and Cleaning Flight Delay Data
+
+This step creates a clean and enriched version of the flight dataset:
+
+- Selects key columns: `Year`, `CRSDepTime`, `DepDelay`, `ArrDelay`, `DayOfWeek`, and `TailNum`
+- Removes duplicate rows
+- Converts `DayOfWeek` numbers (1–7) into weekday names (e.g., "Monday", "Tuesday")
+- Formats `CRSDepTime` into `"HH:MM"` time format
+- Creates a new column `TotalDelay` by summing `DepDelay` and `ArrDelay`
+- Filters out rows with negative `TotalDelay` values
+```{r message=FALSE, warning=FALSE}
+df_Q2a <- df %>%
+  select(Year, CRSDepTime, DepDelay, ArrDelay, DayOfWeek, TailNum) %>%
+  distinct() %>%
+  mutate(
+    DayOfWeek = factor(DayOfWeek, levels = 1:7,
+                       labels = c("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")),
+    CRSDepTime = sprintf("%04d", as.integer(CRSDepTime)),
+    CRSDepTime = format(strptime(CRSDepTime, format = "%H%M"), "%H:%M"),
+    TotalDelay = DepDelay + ArrDelay
+  ) %>%
+  filter(TotalDelay >= 0)
+
+# Print the cleaned and updated dataframe
+print(df_Q2a)
+```
+### Grouping Flights by Departure Time Intervals
+
+This section groups flights based on their scheduled departure time:
+
+- Parses `CRSDepTime` into proper time format (`HH:MM`)
+- Converts departure time into total minutes since midnight
+- Divides the 24-hour day into intervals of 179 minutes
+- Assigns each flight to a `TimeGroup` based on its departure time
+- Increases group numbering by 1 so it starts from 1 instead of 0
+- Removes any rows with missing values after transformation
+
+```{r message=FALSE, warning=FALSE}
+
+# Parse CRSDepTime properly (if not already parsed)
+df_Q2a <- df_Q2a %>%
+  mutate(
+    CRSDepTime = parse_time(CRSDepTime, format = "%H:%M")
+  )
+
+# Define time interval
+time_interval_minutes <- 179
+
+# Convert time to minutes since midnight
+df_Q2a <- df_Q2a %>%
+  mutate(
+    MinutesSinceMidnight = hour(CRSDepTime) * 60 + minute(CRSDepTime),
+    TimeGroup = cut(
+      MinutesSinceMidnight,
+      breaks = seq(0, 1440, by = time_interval_minutes),
+      labels = FALSE,
+      include.lowest = TRUE
+    ),
+    TimeGroup = TimeGroup + 1  # Start group numbering from 1
+  ) %>%
+  drop_na()
+
+# Print the final dataframe
+print(df_Q2a)
+```
+### Creating Labeled 3-Hour Time Intervals
+
+- Uses the `TimeGroup` number to calculate the start and end of each 3-hour interval
+- Labels are formatted as `"HH00hrs–HH59hrs"` (e.g., `"0600hrs–0859hrs"`)
+- Adds a new column called `TimeInterval` with these labels
+
+This makes the time grouping easier to interpret in tables or plots.
+
+```{r message=FALSE, warning=FALSE}
+# Generate labeled 3-hour intervals
+df_Q2a <- df_Q2a %>%
+  mutate(
+    TimeInterval = paste0(
+      sprintf("%02d", (TimeGroup - 2) * 3), "00hrs-",
+      sprintf("%02d", (TimeGroup - 2) * 3 + 2), "59hrs"
+    )
+  )
+
+# Display first 50 rows
+print(df_Q2a)
+```
+### Visualizing Average Delays by Time of Day and Day of Week
+
+This section creates a heatmap to show when delays are most and least severe.
+
+- Groups the data by `TimeInterval` and `DayOfWeek`
+- Calculates the average `TotalDelay` for each combination
+- Converts the summary data into:
+  - **Wide format** for inspection
+  - **Long format** for plotting with `ggplot2`
+
+- Creates a **heatmap**:
+  - Each tile shows the average delay for a specific time and day
+  - Color scale: light blue (short delays) to dark red (long delays)
+  - Delay values are also printed inside the tiles
+
+- Identifies the **minimum and maximum delay** points:
+  - Prints the exact day, time interval, and average delay for both
+
+This helps pinpoint when delays are least and most likely to occur across the week.
+
+```{r message=FALSE, warning=FALSE}
+# Create pivot data with mean TotalDelay for TimeInterval × DayOfWeek
+pivot_data <- df_Q2a %>%
+  group_by(TimeInterval, DayOfWeek) %>%
+  summarise(AvgDelay = mean(TotalDelay, na.rm = TRUE), .groups = "drop")
+
+# Convert to wide format for heatmap and also long format for ggplot
+pivot_wide <- pivot_data %>%
+  pivot_wider(names_from = DayOfWeek, values_from = AvgDelay)
+
+pivot_long <- melt(pivot_wide, id.vars = "TimeInterval", variable.name = "DayOfWeek", value.name = "AvgDelay")
+
+# Heatmap using ggplot
+ggplot(pivot_long, aes(x = DayOfWeek, y = TimeInterval, fill = AvgDelay)) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = round(AvgDelay, 1)), size = 3, na.rm = TRUE) +
+  scale_fill_gradient(low = "lightblue", high = "darkred", na.value = "gray90") +
+  labs(
+    title = "Average Delay by Time of Day and Day of Week",
+    x = "Day of the Week",
+    y = "Time Interval",
+    fill = "Avg Delay (min)"
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 0, hjust = 0.5))
+
+# Find min and max delay values and their locations
+min_row <- pivot_long[which.min(pivot_long$AvgDelay), ]
+max_row <- pivot_long[which.max(pivot_long$AvgDelay), ]
+
+# Print summary of extreme values
+cat(glue::glue("
+Least Delay:
+  - Day: {min_row$DayOfWeek}
+  - Time Interval: {min_row$TimeInterval}
+  - Average Delay: {round(min_row$AvgDelay, 2)} minutes
+
+Longest Delay:
+  - Day: {max_row$DayOfWeek}
+  - Time Interval: {max_row$TimeInterval}
+  - Average Delay: {round(max_row$AvgDelay, 2)} minutes
+"))
+```
+### Analyzing Average Delays by Day of the Week (2000–2004)
+
+This section compares average flight delays across different days of the week for each year.
+
+- Sets the correct order of days (Monday to Sunday) for plotting.
+- Groups the data by `Year` and `DayOfWeek` and calculates the **average total delay**.
+- Converts `DayOfWeek` to a factor to preserve day order in the plot.
+
+#### Bar Plot:
+- Creates a grouped bar chart showing **average delay per day of the week** across years.
+
+#### Identifying Extremes:
+- For each year:
+  - Finds the **day with the least delay**
+  - Finds the **day with the most delay**
+
+This summary helps quickly identify which day of the week had the best and worst delay performance in each year.
+
+```{r fig.width=14, fig.height=8}
+# Define day order
+day_order <- c("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
+
+# Calculate average delay by Year and DayOfWeek
+day_delay_by_year <- df_Q2a %>% group_by(Year, DayOfWeek) %>%
+  summarise(TotalDelay = mean(TotalDelay, na.rm = TRUE), .groups = "drop") %>%
+  mutate(DayOfWeek = factor(DayOfWeek, levels = day_order))
+
+# Bar plot with annotations
+ggplot(day_delay_by_year, aes(x = factor(Year), y = TotalDelay, fill = DayOfWeek)) +
+  geom_bar(stat = "identity", position = position_dodge()) +
+  geom_text(
+    aes(label = sprintf("%.0f min", TotalDelay)),
+    position = position_dodge(width = 0.9),
+    vjust = -0.3,
+    size = 3,
+    na.rm = TRUE
+  ) +
+  scale_fill_brewer(palette = "Blues", direction = 1) +
+  labs(
+    title = "Average Delay by Day of the Week (2000–2004)",
+    x = "Year",
+    y = "Average Total Delay (minutes)",
+    fill = "Day of Week"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "right") +
+  guides(fill = guide_legend(title.position = "top")) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.1)))  # Add space for text
+
+# Identify least and most delayed days per year
+least_delay_days <- day_delay_by_year %>%
+  group_by(Year) %>%
+  slice_min(TotalDelay, with_ties = FALSE)
+
+most_delay_days <- day_delay_by_year %>%
+  group_by(Year) %>%
+  slice_max(TotalDelay, with_ties = FALSE)
+
+# Combine into summary table
+delay_summary <- left_join(
+  least_delay_days %>% rename(DayOfWeek_LeastDelay = DayOfWeek, TotalDelay_LeastDelay = TotalDelay),
+  most_delay_days %>% rename(DayOfWeek_MostDelay = DayOfWeek, TotalDelay_MostDelay = TotalDelay),
+  by = "Year"
+) %>%
+  mutate(
+    TotalDelay_LeastDelay = paste0(round(TotalDelay_LeastDelay), " mins"),
+    TotalDelay_MostDelay = paste0(round(TotalDelay_MostDelay), " mins"))
+
+```
+### 🕘 Analyzing Delays by Time Interval (2000–2004)
+
+This section evaluates how average flight delays vary across different times of day for each year.
+
+- **Step 1**: Groups the data by `Year` and `TimeInterval`, then calculates the **average total delay**.
+- **Step 2**: Extracts the starting hour from `TimeInterval` to sort time groups in logical order.
+- **Step 3**: Creates a **grouped bar plot**:
+  - Shows average delay per time block for each year.
+  - Adds delay values as labels on each bar.
+  - Uses a purple color palette for clarity.
+
+- **Step 4**: Identifies the **least and most delayed time intervals** for each year.
+- **Step 5**: Combines the results into a summary table.
+- **Step 6**: Displays the final table using `kable()` for a clean, formatted view.
+
+This helps reveal which times of day were typically best or worst for on-time arrivals.
+
+```{r fig.width=14, fig.height=8}
+# Step 1: Calculate average delay by Year and TimeInterval
+time_delay_by_year <- df_Q2a %>% group_by(Year, TimeInterval) %>%
+  summarise(TotalDelay = mean(TotalDelay, na.rm = TRUE), .groups = "drop")
+
+# Step 2: Extract numeric order from TimeInterval using base R
+time_delay_by_year <- time_delay_by_year %>%
+  mutate(
+    TimeOrder = as.integer(sub("^(\\d+).*", "\\1", TimeInterval)),
+    TimeInterval = fct_reorder(TimeInterval, TimeOrder)
+  )
+
+# Step 3: Plot bar chart with annotated labels
+ggplot(time_delay_by_year, aes(x = factor(Year), y = TotalDelay, fill = TimeInterval)) +
+  geom_bar(stat = "identity", position = position_dodge()) +
+  geom_text(
+    aes(label = sprintf("%.0f min", TotalDelay)),
+    position = position_dodge(width = 0.9),
+    vjust = -0.3,
+    size = 2.8,
+    na.rm = TRUE
+  ) +
+  scale_fill_brewer(palette = "Purples") +
+  labs(
+    title = "Average Delay by Time Interval (2000–2004)",
+    x = "Year",
+    y = "Average Total Delay (minutes)",
+    fill = "Time Interval"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "right") +
+  guides(fill = guide_legend(title.position = "top")) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.1)))
+
+# Step 4: Find least and most delayed time intervals per year
+least_delay_times <- time_delay_by_year %>%
+  group_by(Year) %>%
+  slice_min(TotalDelay, with_ties = FALSE)
+
+most_delay_times <- time_delay_by_year %>%
+  group_by(Year) %>%
+  slice_max(TotalDelay, with_ties = FALSE)
+
+# Step 5: Combine into summary table
+time_delay_summary <- left_join(
+  least_delay_times %>% rename(TimeInterval_LeastDelay = TimeInterval, TotalDelay_LeastDelay = TotalDelay),
+  most_delay_times %>% rename(TimeInterval_MostDelay = TimeInterval, TotalDelay_MostDelay = TotalDelay),
+  by = "Year"
+) %>%
+  mutate(
+    TotalDelay_LeastDelay = paste0(round(TotalDelay_LeastDelay), " mins"),
+    TotalDelay_MostDelay = paste0(round(TotalDelay_MostDelay), " mins")
+  )
+
+# Step 6: Display the final summary table
+kable(time_delay_summary, caption = "Least and Most Delayed Time Intervals per Year", align = "c")
+
+```
+
+### Question 2b
+
+### Loading and Cleaning Aircraft Data
+
+This section prepares aircraft information for merging with flight delay data:
+
+- Loads the aircraft dataset from `"plane-data.csv"`.
+- Selects relevant columns (`Year`, `TotalDelay`, `TailNum`) from the cleaned flight delay dataset `df_Q2a`.
+- Filters the plane data to keep rows where `issue_date` is available and not `"None"`.
+- Converts `issue_date` to proper date format.
+- Calculates `YearOfCommission`:
+  - If the aircraft was issued in December, the commission year is set to the following year.
+- Renames `tailnum` to `TailNum` to match with the flight dataset.
+- Keeps only the necessary columns for merging: `TailNum`, `issue_date`, and `YearOfCommission`.
+This prepares both datasets for combining based on aircraft tail numbers.
+
+
+```{r message=FALSE, warning=FALSE}
+
+df_plane_Q2b <- df_plane %>%
+  filter(!is.na(issue_date) & issue_date != "None") %>%
+  mutate(
+    issue_date = as.Date(issue_date, format = "%m/%d/%Y"),
+    YearOfCommission = year(issue_date) + ifelse(month(issue_date) > 11, 1, 0),
+    TailNum = tailnum
+  ) %>%
+  select(TailNum, issue_date, YearOfCommission)
+
+# Step 1: Load plane data
+df_plane <- read_csv("plane-data.csv")
+
+# Step 2: Select relevant columns from df_Q2a
+df_Q2b <- df_Q2a %>%
+  select(Year, TotalDelay, TailNum)
+
+# Step 3: Select and clean plane data
+df_plane_Q2b <- df_plane %>%
+  select(tailnum, issue_date) %>%
+  filter(!is.na(issue_date))
+
+
+
+# Step 4: Print data (first few rows for readability)
+print(head(df_Q2b, 10))
+print(head(df_plane_Q2b, 10))
+
+```
+### Final Cleaning of Aircraft Data
+
+This step ensures the aircraft dataset is correctly formatted and ready for merging:
+
+- Parses `issue_date` into proper `Date` format using `"MM/DD/YYYY"` style.
+- Calculates `YearOfCommission`:
+  - Adds 1 year if the aircraft was issued in December (to account for end-of-year delivery).
+- Renames `tailnum` to `TailNum` if it exists, to match the naming convention in the flight data.
+
+This prepares the aircraft data for accurate joining with flight delay records.
+
+```{r message=FALSE, warning=FALSE}
+
+
+
+# Parse issue_date (assuming MM/DD/YYYY format)
+df_plane_Q2b <- df_plane_Q2b %>%
+ mutate(issue_date = as.Date(issue_date, format = "%m/%d/%Y"))  
+
+# Add YearOfCommission
+df_plane_Q2b <- df_plane_Q2b %>%
+ mutate(YearOfCommission = year(issue_date) + ifelse(month(issue_date) > 11, 1, 0))
+
+# Rename if tailnum exists
+if ("tailnum" %in% names(df_plane_Q2b)) {
+  df_plane_Q2b <- df_plane_Q2b %>%
+    rename(TailNum = tailnum)
+}
+
+# View output
+print(head(df_plane_Q2b, 10))
+
+    
+```
+### Merging Flight and Aircraft Data
+
+This section combines flight delay data with aircraft commission data:
+
+- Performs an **inner join** on `TailNum` to keep only records where both flight and aircraft information are available.
+- Removes any duplicate rows that may result from the merge.
+
+```{r message=FALSE, warning=FALSE}
+# Inner join on TailNum
+df_Q2b <- inner_join(df_Q2b, df_plane_Q2b, by = "TailNum")
+
+# Drop duplicate rows
+df_Q2b <- df_Q2b %>% distinct()
+
+print(head(df_Q2b, 10))
+
+```
+
+### Calculating Aircraft Age at Time of Flight
+
+- Calculates aircraft `Age` by subtracting `YearOfCommission` from the flight `Year`.
+- Filters out rows where the result is negative.
+
+This gives the age of each aircraft at the time of its flight.
+```{r message=FALSE, warning=FALSE}
+# Calculate Age
+df_Q2b <- df_Q2b %>%
+  mutate(Age = Year - YearOfCommission)
+
+# Filter out negative ages
+df_Q2b <- df_Q2b %>%
+  filter(Age >= 0)
+
+# View result
+print(head(df_Q2b, 10))
+```
+### Categorizing Aircraft Age
+
+- Creates a new column `Age_Category` to group aircraft into:
+  - `"Young"`: less than 10 years old
+  - `"Middle"`: between 10 and 19 years old
+  - `"Old"`: 20 years or older
+
+```{r message=FALSE, warning=FALSE}
+# Categorize Age into Young, Middle, Old
+df_Q2b <- df_Q2b %>%
+  mutate(
+    Age_Category = case_when(
+      Age < 10 ~ "Young",
+      Age >= 10 & Age < 20 ~ "Middle",
+      Age >= 20 ~ "Old"
+    )
+  )
+
+# Reset row index 
+df_Q2b <- df_Q2b %>%
+  mutate(RowID = row_number()) %>%
+  select(-RowID)  
+
+print(head(df_Q2b, 10))
+```
+### Converting Decimal Delays to Minutes and Seconds
+
+Defines a helper function `convert_to_minutes_seconds()` that:
+
+- Takes a numeric delay value (in decimal minutes)
+- Converts the whole number part to **minutes**
+- Converts the fractional part to **seconds**
+- Returns a formatted string like `"5m 30s"`
+- Returns `NA` if the input is missing
+
+```{r message=FALSE, warning=FALSE}
+convert_to_minutes_seconds <- function(delay) {
+  if (is.na(delay)) {
+    return(NA_character_)
+  }
+  minutes <- floor(delay)
+  seconds <- round((delay - minutes) * 60)
+  return(paste0(minutes, "m ", seconds, "s"))
+}
+```
+### 📊 Average Delay by Aircraft Age Group Formating
+
+- Sorts the dataset by `Year` and `Age_Category` for organized grouping.
+- Calculates the **average `TotalDelay`** for each year and aircraft age group.
+- Applies a formatting function to convert delay values into `"Xm Ys"` format (e.g., `"12m 30s"`).
+
+```{r message=FALSE, warning=FALSE}
+# Sort by Year and Age_Category
+df_Q2b <- df_Q2b %>%
+  arrange(Year, Age_Category)
+
+# Group and calculate mean TotalDelay
+df_Q2b_grouped <- df_Q2b %>%
+  group_by(Year, Age_Category) %>%
+  summarise(Mean = mean(TotalDelay, na.rm = TRUE), .groups = "drop")
+
+# Apply formatting
+df_Q2b_grouped <- df_Q2b_grouped %>%
+  mutate(Mean_Formatted = sapply(Mean, convert_to_minutes_seconds))
+
+# Print result
+print(df_Q2b_grouped)
+```
+### 📊 Mean Delay by Aircraft Age Group 
+
+This section visualizes and summarizes how average flight delays vary by aircraft age group for each year.
+
+- Ensures `Age_Category` is properly ordered as: **Young → Middle → Old**
+- Creates a **grouped bar plot**:
+  - X-axis: `Year`
+  - Y-axis: average delay (`Mean`)
+  - Bars are grouped and colored by `Age_Category`
+  - Delay values (in minutes) are shown above each bar for clarity
+  - Uses a clean `theme_minimal()` layout with a blue-green color scale
+
+```{r message=FALSE, warning=FALSE}
+# Ensure Age_Category is ordered
+df_Q2b_grouped <- df_Q2b_grouped %>%
+  mutate(
+    Age_Category = factor(Age_Category, levels = c("Young", "Middle", "Old")),
+    Mean_Formatted = sapply(Mean, convert_to_minutes_seconds)
+  )
+
+# Create grouped bar plot with labels
+ggplot(df_Q2b_grouped, aes(x = factor(Year), y = Mean, fill = Age_Category)) +
+  geom_bar(stat = "identity", position = position_dodge()) +
+  geom_text(
+    aes(label = paste0(sprintf("%02d", floor(Mean)), "m")),
+    position = position_dodge(width = 0.9),
+    vjust = -0.3,
+    size = 3,
+    na.rm = TRUE
+  ) +
+  scale_fill_brewer(palette = "GnBu", direction = 1) +
+  labs(
+    title = "Annual Mean Delay by Age Category (2000–2004)",
+    x = "Year",
+    y = "Mean Delay (minutes)",
+    fill = "Age Category"
+  ) +
+  theme_minimal() +
+  theme(
+    legend.position = "right",
+    plot.title = element_text(size = 14, face = "bold")
+  ) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.1)))
+
+# Step 4: Identify highest delay category per year
+years <- 2000:2003
+highest_mean_by_year <- list()
+
+for (yr in years) {
+  year_data <- df_Q2b_grouped %>% filter(Year == yr)
+  if (nrow(year_data) > 0 && any(!is.na(year_data$Mean))) {
+    max_row <- year_data[which.max(year_data$Mean), ]
+    highest_mean_by_year[[as.character(yr)]] <- list(
+      Category = max_row$Age_Category,
+      Mean = max_row$Mean_Formatted
+    )
+  }
+}
+
+# Step 5: Print summary results
+for (yr in names(highest_mean_by_year)) {
+  info <- highest_mean_by_year[[yr]]
+  cat(sprintf("Year %s: %s has the highest mean delay of %s\n",
+              yr, info$Category, info$Mean))
+}
+```
+### 2-way ANOVA: Effect of Year and Aircraft Age on Delay
+
+This section uses a linear model to test whether **Year**, **Aircraft Age Category**, and their **interaction** have a statistically significant effect on average flight delays.
+
+This helps determine whether changes in delay are significantly related to aircraft age, the year of operation, or both combined.
+```{r message=FALSE, warning=FALSE}
+# Fit linear model with interaction
+model <- lm(Mean ~ Year + Age_Category + Year:Age_Category, data = df_Q2b_grouped)
+
+# Perform Type II ANOVA
+anova_table <- Anova(model, type = 2)  # from car package
+
+print(anova_table)
+```
+### Deleting Cleaned CSV Files (2000–2004)
+
+This chunk removes temporary or intermediate CSV files created during data processing.
+
+- **Step 1**: Generates a list of file names: `2000_Q2AB.csv` to `2004_Q2AB.csv`
+- **Step 2**: Prints the list of files that are about to be deleted
+- **Step 3**: Prompts the user for confirmation before deletion
+  - Accepts `'Y'` to proceed or `'N'` to cancel
+  - Loops until valid input is provided
+- **Step 4**: If confirmed, deletes each file and reports the outcome
+
+```{r message=FALSE, warning=FALSE}
+# Generate list of file names
+years <- 2000:2004
+csv_files <- paste0(years, "_Q2AB.csv")
+
+# Show list of files to delete
+cat("Files to be deleted:\n")
+print(csv_files)
+
+# Prompt for user confirmation
+confirmation <- tolower(readline(prompt = "Do you want to delete the above files? (Y/N): "))
+
+while (confirmation != "y") {
+  if (confirmation == "n") {
+    cat("Deletion cancelled. Run the chunk again to retry. Thank you.\n")
+    break
+  } else {
+    confirmation <- tolower(readline(prompt = "Invalid input. Please enter 'Y' or 'N': "))
+  }
+}
+
+# Delete files if confirmed
+if (confirmation == "y") {
+  for (file in csv_files) {
+    if (file.exists(file)) {
+      file.remove(file)
+      cat("Deleted:", file, "\n")
+    } else {
+      cat("File not found:", file, "\n")
+    }
+  }
+  cat("Task completed! Cleaned files deleted.\n")
+}
+```
+### Question 2C
+
+### Cleaning and Saving Required Columns from Raw CSV Files (2000–2004)
+
+This code processes raw flight data files by keeping only the necessary columns and removing rows with missing values.
+
+- **Defines file names**: `"2000.csv"` to `"2004.csv"`
+- **Lists required columns** for analysis (e.g., departure/arrival times, distance, carrier, etc.)
+- **Loops through each file**:
+  - Attempts to read using UTF-8 encoding; falls back to Latin-1 if needed
+  - If all required columns are present:
+    - Keeps only those columns
+    - Removes rows with missing values
+    - Saves the cleaned data to a new file with `_Q2C.csv` suffix
+  - Otherwise, skips the file and prints a warning
+```{r message=FALSE, warning=FALSE}
+# Define file names
+years <- 2000:2004
+csv_files <- paste0(years, ".csv")
+
+# Define required columns
+columns_needed <- c("Month", "DayofMonth", "DayOfWeek", "CRSDepTime", "CRSArrTime", 
+                    "Distance", "UniqueCarrier", "Origin", "Dest", "TaxiOut", "Year", "Diverted")
+
+# Loop through files
+for (file in csv_files) {
+  cat("Reading", file, "...\n")
+  
+  # Try UTF-8, fallback to Latin-1
+  data <- tryCatch({
+    read_csv(file, locale = locale(encoding = "UTF-8"))
+  }, error = function(e) {
+    cat("UTF-8 failed, trying Latin-1...\n")
+    read_csv(file, locale = locale(encoding = "Latin1"))
+  })
+  
+  # Keep only needed columns and remove NA
+  if (all(columns_needed %in% colnames(data))) {
+    updated_data <- data %>%
+      select(all_of(columns_needed)) %>%
+      drop_na()
+    
+    # Save to new CSV file
+    output_file <- gsub(".csv", "_Q2C.csv", file)
+    write_csv(updated_data, output_file)
+    
+    cat("Processed:", file, "→ Saved as", output_file, "\n")
+  } else {
+    cat("Warning:", file, "is missing some required columns. Skipping.\n")
+  }
+}
+```
+
+### Loading and Combining Cleaned Data (2000–2004)
+
+This section loads all processed `_Q2C.csv` files and combines them into a single dataset for analysis.
+
+- Defines `top_n_levels()`:
+  - Keeps only the top `n` most frequent levels in a categorical variable
+  - Groups all other levels into `"Other"`
+
+- Loops through each year from 2000 to 2004:
+  - Loads the corresponding cleaned CSV file (if it exists)
+  - Appends the data to `combined_data`
+  - Skips any missing files and prints a message
+
+The result is a combined dataset across all five years, ready for modeling and exploration.
+
+```{r message=FALSE, warning=FALSE}
+# function to group factor levels
+top_n_levels <- function(vec, n = 20) {
+  top_levels <- names(sort(table(vec), decreasing = TRUE))[1:n]
+  factor(ifelse(vec %in% top_levels, vec, "Other"))
+}
+```
+### 📂 Combining Cleaned Flight Data (2000–2004)
+
+This step loads and merges yearly cleaned flight data files into one dataset:
+
+- Loops through the years **2000 to 2004**
+- Constructs each file name (e.g., `2000_Q2C.csv`)
+- If the file exists:
+  - Reads the CSV file using `read_csv()`
+  - Appends its content to `combined_data`
+- If the file does not exist, prints a warning message
+
+The final result is a unified dataset, `combined_data`, containing flight records from all available years.
+
+```{r message=FALSE, warning=FALSE}
+# Load and combine all processed _Q2C CSVs
+years <- 2000:2004
+combined_data <- data.frame()
+
+for (year in years) {
+  file <- paste0(year, "_Q2C.csv")
+  if (file.exists(file)) {
+    df <- read_csv(file, show_col_types = FALSE)
+    combined_data <- bind_rows(combined_data, df)
+  } else {
+    cat("File not found:", file, "\n")
+  }
+}
+```
+### Preprocessing Combined Flight Data for Modeling
+
+This step prepares the full dataset (`combined_data`) for modeling by filtering and formatting key variables:
+
+- **Removes rows with missing values** in important columns:
+  - Month, DayofMonth, Departure/Arrival times, Distance, Carrier, Origin, Destination, and Diverted status
+- **Reduces category levels** using the `top_n_levels()` function:
+  - Keeps the top 20 most frequent `Origin` and `Dest` airports
+  - Keeps the top 10 most frequent `UniqueCarrier` values
+  - All other values are grouped under `"Other"`
+- **Converts key columns to factors**: `Month`, `DayofMonth`, `UniqueCarrier`, `Origin`, and `Dest`
+
+```{r message=FALSE, warning=FALSE}
+# Preprocessing
+  Qn_2C <- combined_data %>%
+  filter(!is.na(Month), !is.na(DayofMonth), !is.na(CRSDepTime), !is.na(CRSArrTime), 
+         !is.na(Distance), !is.na(UniqueCarrier), !is.na(Origin), !is.na(Dest), !is.na(Diverted)) %>%
+  mutate(
+    Origin = top_n_levels(Origin, 20),
+    Dest = top_n_levels(Dest, 20),
+    UniqueCarrier = top_n_levels(UniqueCarrier, 10),
+    Month = as.factor(Month),
+    DayofMonth = as.factor(DayofMonth),
+    UniqueCarrier = as.factor(UniqueCarrier),
+    Origin = as.factor(Origin),
+    Dest = as.factor(Dest)
+  )
+```
+
+### Logistic Regression Modeling by Year (2000–2004)
+This section fits a logistic regression model for each year to predict whether a flight was diverted, using selected flight features.
+
+#### Model Setup
+- Defines a formula to model `Diverted` using:
+  - Month, DayofMonth, CRSDepTime, CRSArrTime, Distance, UniqueCarrier, Origin, and Dest
+- Initializes storage to save:
+  - Coefficients
+  - AUC scores
+  - Predicted probabilities and actual outcomes
+
+#### Yearly Modeling Loop
+For each year (2000–2004):
+- Filters data for that year
+- Splits into 80% training and 20% testing sets
+- Fits a **logistic regression model** using `glm()` with a binomial family
+- Extracts model coefficients:
+  - Cleans and groups them by feature for summarization
+  - Stores both grouped and ungrouped versions
+- Predicts probabilities on the test set
+- Calculates **AUC** (Area Under the ROC Curve) for model performance
+- Prints:
+  - Simplified average coefficients per feature
+  - AUC score for that year
+
+
+#### Final Model Evaluation
+- After looping through all years:
+  - Combines predictions across years
+  - Calculates the **overall AUC score**
+  - Prints the final performance summary
+
+This process provides yearly and overall insight into which features influenced flight diversions, and how accurately the model performed.
+
+```{r message=FALSE, warning=FALSE}
+# Model formula
+model_formula <- Diverted ~ Month + DayofMonth + CRSDepTime + CRSArrTime + Distance + UniqueCarrier + Origin + Dest
+
+# Initialize storage
+coefficients <- list()
+ungrouped_coefs <- list()
+year_list <- list()
+all_y_true <- c()
+all_y_prob <- c()
+
+# Loop through years
+for (year in years) {
+  cat("\nProcessing year:", year, "\n")
+  
+  Qn_2C_year <- Qn_2C %>% filter(Year == year)
+  
+  if (nrow(Qn_2C_year) == 0) {
+    cat("No data available for", year, ", skipping...\n")
+    next
+  }
+  
+  set.seed(42)
+  train_index <- createDataPartition(Qn_2C_year$Diverted, p = 0.8, list = FALSE)
+  train_data <- Qn_2C_year[train_index, ]
+  test_data <- Qn_2C_year[-train_index, ]
+  
+  model <- glm(model_formula, data = train_data, family = binomial)
+  
+  # Coefficient summarization with cleaned names
+  tidy_model <- tidy(model) %>%
+    filter(term != "(Intercept)") %>%
+    mutate(
+      term = gsub("(?<=[a-z])(?=[A-Z])", "_", term, perl = TRUE),     # Add underscore between lowercase-uppercase
+      term = gsub("[0-9]+$", "", term),                               # Remove trailing numbers
+      feature = gsub("_[^_]+$", "", term)                             # Remove one-hot encoded levels
+    )
+  
+  summary_coef <- tidy_model %>%
+    group_by(feature) %>%
+    summarize(mean_coef = mean(estimate, na.rm = TRUE))
+  
+  coefficients[[as.character(year)]] <- summary_coef
+  year_list[[length(year_list) + 1]] <- year
+  ungrouped_coefs[[as.character(year)]] <- tidy(model) %>%
+    filter(term != "(Intercept)") %>%
+    rename(feature = term, mean_coef = estimate)
+
+
+  
+  # AUC
+  y_prob <- predict(model, newdata = test_data, type = "response")
+  auc_value <- auc(test_data$Diverted, y_prob)
+  all_y_true <- c(all_y_true, test_data$Diverted)
+  all_y_prob <- c(all_y_prob, y_prob)
+  
+  # Print summary
+  cat("Simplified Coefficients for", year, ":\n")
+  print(summary_coef)
+  cat(sprintf("AUC Score for %d: %.4f\n", year, auc_value))
+  cat(strrep("=", 50), "\n")
+}
+
+# Overall AUC
+if (length(all_y_true) > 0) {
+  overall_auc <- auc(all_y_true, all_y_prob)
+  cat(sprintf("\n✅ Overall AUC Score across all years: %.4f\n", overall_auc))
+} else {
+  cat("\n⚠️ No data available for AUC calculation.\n")
+}
+```
+### 📉 Plotting the ROC Curve for Diversion Prediction
+
+This section visualizes the model’s performance across all years using an ROC (Receiver Operating Characteristic) curve.
+
+- Creates an ROC object using the combined true labels (`all_y_true`) and predicted probabilities (`all_y_prob`)
+- Extracts:
+  - **False Positive Rate (FPR)** = 1 - Specificity
+  - **True Positive Rate (TPR)** = Sensitivity
+- Calculates the **AUC (Area Under the Curve)** value
+
+#### 🖼️ Plot:
+- Draws the ROC curve using `ggplot2`
+- Adds a diagonal dashed line as a baseline (random guess)
+- Displays the AUC value in the subtitle
+- Uses a minimal theme for clean visual presentation
+
+The ROC curve provides a visual assessment of how well the model distinguishes between diverted and non-diverted flights.
+```{r message=FALSE, warning=FALSE}
+# Create ROC object
+roc_obj <- roc(all_y_true, all_y_prob)
+
+# Extract values for plotting
+roc_df <- data.frame(
+  FPR = 1 - roc_obj$specificities,
+  TPR = roc_obj$sensitivities
+)
+
+auc_value <- auc(roc_obj)
+
+# Plot using ggplot2
+ggplot(roc_df, aes(x = FPR, y = TPR)) +
+  geom_line(color = "blue", size = 1) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "grey50") +
+  labs(
+    title = "Receiver Operating Characteristic (ROC) Curve",
+    subtitle = paste("AUC =", round(auc_value, 4)),
+    x = "False Positive Rate (FPR)",
+    y = "True Positive Rate (TPR)"
+  ) +
+  theme_minimal(base_size = 14)
+```
+### Top Logistic Regression Features for Year 2000
+
+This section visualizes the most influential features from the 2000 logistic regression model.
+
+- Uses the **ungrouped coefficients** from the model to identify specific predictors (e.g., `Dest_LAX`, `Origin_EWR`)
+- Extracts:
+  - The **top 8 destination-related features** (starting with `"Dest"`) by absolute coefficient value
+  - The **top 10 most impactful features overall**, excluding destinations
+- Combines both sets, removes duplicates, and sorts by coefficient value
+
+####️ Plot:
+- Bar chart shows each feature's **coefficient**, which indicates:
+  - **Positive values**: feature increases the likelihood of a flight being diverted
+  - **Negative values**: feature decreases that likelihood
+
+This chart highlights which destination airports and other features had the strongest influence on flight diversion predictions in 2000.The same set of codes are excuted for the other 4 years from 2001 to 2004 
+
+```{r message=FALSE, warning=FALSE}
+# Choose year to plot
+year_to_plot <- 2000
+
+# Use ungrouped coefficients (specific features like Dest_LAX, Origin_EWR)
+coef_df <- ungrouped_coefs[[as.character(year_to_plot)]]
+
+# Get top 8 destination-related features (e.g., Dest_LAX)
+top8_dest <- coef_df %>%
+  filter(grepl("^Dest", feature)) %>%
+  slice_max(order_by = abs(mean_coef), n = 8)
+
+# Get top 10 features overall (by absolute value)
+top10_other <- coef_df %>%
+  filter(!grepl("^Dest", feature)) %>%
+  slice_max(order_by = abs(mean_coef), n = 8)
+
+# Combine, remove duplicates, and sort for plotting
+combined <- bind_rows(top8_dest, top10_other) %>%
+  distinct(feature, .keep_all = TRUE) %>%
+  arrange(mean_coef)
+
+# Gradient color (magma style)
+norm_vals <- scales::rescale(abs(combined$mean_coef), to = c(0.3, 0.7))
+colors <- scales::gradient_n_pal(viridisLite::magma(100))(norm_vals)
+
+# Plot
+ggplot(combined, aes(x = mean_coef, y = reorder(feature, mean_coef))) +
+  geom_col(fill = colors) +
+  geom_text(
+    aes(label = round(mean_coef, 3),
+        hjust = ifelse(mean_coef > 0, -0.1, 1.1)),
+    size = 3.2,
+    color = "black"
+  ) +
+  geom_vline(xintercept = 0, color = "gray40", size = 0.6) +
+  labs(
+    title = paste0("Top 8 Destinations + Top 10 Most Significant Features\n(Logistic Regression Coefficients - ", year_to_plot, ")"),
+    x = "Coefficient Value",
+    y = "Feature"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(
+    plot.title = element_text(size = 14, face = "bold", hjust = 0.5),
+    axis.text = element_text(size = 10),
+    axis.title = element_text(size = 12),
+    panel.grid.major.x = element_line(linetype = "dashed", color = "gray70"),
+    panel.grid.minor = element_blank()
+  ) +
+  coord_cartesian(clip = "off")
+
+```
+
+### Top Logistic Regression Features for Year 2001
+```{r message=FALSE, warning=FALSE}
+# Choose year to plot
+year_to_plot <- 2001
+
+coef_df <- ungrouped_coefs[[as.character(year_to_plot)]]
+
+top8_dest <- coef_df %>%
+  filter(grepl("^Dest", feature)) %>%
+  slice_max(order_by = abs(mean_coef), n = 8)
+
+top10_other <- coef_df %>%
+  filter(!grepl("^Dest", feature)) %>%
+  slice_max(order_by = abs(mean_coef), n = 10)
+
+combined <- bind_rows(top8_dest, top10_other) %>%
+  distinct(feature, .keep_all = TRUE) %>%
+  arrange(mean_coef)
+
+norm_vals <- scales::rescale(abs(combined$mean_coef), to = c(0.3, 0.7))
+colors <- scales::gradient_n_pal(viridisLite::magma(100))(norm_vals)
+
+ggplot(combined, aes(x = mean_coef, y = reorder(feature, mean_coef))) +
+  geom_col(fill = colors) +
+  geom_text(
+    aes(label = round(mean_coef, 3),
+        hjust = ifelse(mean_coef > 0, -0.1, 1.1)),
+    size = 3.2, color = "black") +
+  geom_vline(xintercept = 0, color = "gray40", size = 0.6) +
+  labs(
+    title = paste0("Top 8 Destinations + Top 10 Most Significant Features\n(Logistic Regression Coefficients - ", year_to_plot, ")"),
+    x = "Coefficient Value", y = "Feature") +
+  theme_minimal(base_size = 13) +
+  theme(
+    plot.title = element_text(size = 14, face = "bold", hjust = 0.5),
+    axis.text = element_text(size = 10),
+    axis.title = element_text(size = 12),
+    panel.grid.major.x = element_line(linetype = "dashed", color = "gray70"),
+    panel.grid.minor = element_blank()) +
+  coord_cartesian(clip = "off")
+
+```
+
+### Top Logistic Regression Features for Year 2002
+```{r message=FALSE, warning=FALSE}
+# Choose year to plot
+year_to_plot <- 2002
+
+coef_df <- ungrouped_coefs[[as.character(year_to_plot)]]
+
+top8_dest <- coef_df %>%
+  filter(grepl("^Dest", feature)) %>%
+  slice_max(order_by = abs(mean_coef), n = 8)
+
+top10_other <- coef_df %>%
+  filter(!grepl("^Dest", feature)) %>%
+  slice_max(order_by = abs(mean_coef), n = 10)
+
+combined <- bind_rows(top8_dest, top10_other) %>%
+  distinct(feature, .keep_all = TRUE) %>%
+  arrange(mean_coef)
+
+norm_vals <- scales::rescale(abs(combined$mean_coef), to = c(0.3, 0.7))
+colors <- scales::gradient_n_pal(viridisLite::magma(100))(norm_vals)
+
+ggplot(combined, aes(x = mean_coef, y = reorder(feature, mean_coef))) +
+  geom_col(fill = colors) +
+  geom_text(
+    aes(label = round(mean_coef, 3),
+        hjust = ifelse(mean_coef > 0, -0.1, 1.1)),
+    size = 3.2, color = "black") +
+  geom_vline(xintercept = 0, color = "gray40", size = 0.6) +
+  labs(
+    title = paste0("Top 8 Destinations + Top 10 Most Significant Features\n(Logistic Regression Coefficients - ", year_to_plot, ")"),
+    x = "Coefficient Value", y = "Feature") +
+  theme_minimal(base_size = 13) +
+  theme(
+    plot.title = element_text(size = 14, face = "bold", hjust = 0.5),
+    axis.text = element_text(size = 10),
+    axis.title = element_text(size = 12),
+    panel.grid.major.x = element_line(linetype = "dashed", color = "gray70"),
+    panel.grid.minor = element_blank()) +
+  coord_cartesian(clip = "off")
+
+```
+
+### Top Logistic Regression Features for Year 2003
+```{r message=FALSE, warning=FALSE}
+# Choose year to plot
+year_to_plot <- 2003
+
+coef_df <- ungrouped_coefs[[as.character(year_to_plot)]]
+
+top8_dest <- coef_df %>%
+  filter(grepl("^Dest", feature)) %>%
+  slice_max(order_by = abs(mean_coef), n = 8)
+
+top10_other <- coef_df %>%
+  filter(!grepl("^Dest", feature)) %>%
+  slice_max(order_by = abs(mean_coef), n = 10)
+
+combined <- bind_rows(top8_dest, top10_other) %>%
+  distinct(feature, .keep_all = TRUE) %>%
+  arrange(mean_coef)
+
+norm_vals <- scales::rescale(abs(combined$mean_coef), to = c(0.3, 0.7))
+colors <- scales::gradient_n_pal(viridisLite::magma(100))(norm_vals)
+
+ggplot(combined, aes(x = mean_coef, y = reorder(feature, mean_coef))) +
+  geom_col(fill = colors) +
+  geom_text(
+    aes(label = round(mean_coef, 3),
+        hjust = ifelse(mean_coef > 0, -0.1, 1.1)),
+    size = 3.2, color = "black") +
+  geom_vline(xintercept = 0, color = "gray40", size = 0.6) +
+  labs(
+    title = paste0("Top 8 Destinations + Top 10 Most Significant Features\n(Logistic Regression Coefficients - ", year_to_plot, ")"),
+    x = "Coefficient Value", y = "Feature") +
+  theme_minimal(base_size = 13) +
+  theme(
+    plot.title = element_text(size = 14, face = "bold", hjust = 0.5),
+    axis.text = element_text(size = 10),
+    axis.title = element_text(size = 12),
+    panel.grid.major.x = element_line(linetype = "dashed", color = "gray70"),
+    panel.grid.minor = element_blank()) +
+  coord_cartesian(clip = "off")
+
+```
+
+### Top Logistic Regression Features for Year 2004
+```{r message=FALSE, warning=FALSE}
+# Choose year to plot
+year_to_plot <- 2004
+
+coef_df <- ungrouped_coefs[[as.character(year_to_plot)]]
+
+top8_dest <- coef_df %>%
+  filter(grepl("^Dest", feature)) %>%
+  slice_max(order_by = abs(mean_coef), n = 8)
+
+top10_other <- coef_df %>%
+  filter(!grepl("^Dest", feature)) %>%
+  slice_max(order_by = abs(mean_coef), n = 10)
+
+combined <- bind_rows(top8_dest, top10_other) %>%
+  distinct(feature, .keep_all = TRUE) %>%
+  arrange(mean_coef)
+
+norm_vals <- scales::rescale(abs(combined$mean_coef), to = c(0.3, 0.7))
+colors <- scales::gradient_n_pal(viridisLite::magma(100))(norm_vals)
+
+ggplot(combined, aes(x = mean_coef, y = reorder(feature, mean_coef))) +
+  geom_col(fill = colors) +
+  geom_text(
+    aes(label = round(mean_coef, 3),
+        hjust = ifelse(mean_coef > 0, -0.1, 1.1)),
+    size = 3.2, color = "black") +
+  geom_vline(xintercept = 0, color = "gray40", size = 0.6) +
+  labs(
+    title = paste0("Top 8 Destinations + Top 10 Most Significant Features\n(Logistic Regression Coefficients - ", year_to_plot, ")"),
+    x = "Coefficient Value", y = "Feature") +
+  theme_minimal(base_size = 13) +
+  theme(
+    plot.title = element_text(size = 14, face = "bold", hjust = 0.5),
+    axis.text = element_text(size = 10),
+    axis.title = element_text(size = 12),
+    panel.grid.major.x = element_line(linetype = "dashed", color = "gray70"),
+    panel.grid.minor = element_blank()) +
+  coord_cartesian(clip = "off")
+
+```
+### Comparing Feature Importance Across Years (2000–2004)
+
+This plot shows how the **average logistic regression coefficient** for each feature changes over time.
+
+- Combines yearly coefficient summaries (`coefficients`) into one data frame
+- Converts `Year` to numeric for proper ordering
+- Creates a **grouped bar chart**:
+
+```{r message=FALSE, warning=FALSE}
+# Combine coefficient summaries into one data frame
+coef_df <- bind_rows(coefficients, .id = "Year")
+
+# Convert Year to numeric for sorting
+coef_df$Year <- as.numeric(coef_df$Year)
+
+# Plot: grouped bar chart by feature and year
+ggplot(coef_df, aes(x = factor(Year), y = mean_coef, fill = feature)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  scale_y_continuous(limits = c(-0.25, 0.5)) +
+  labs(
+    title = "Average Logistic Regression Coefficients by Feature and Year",
+    x = "Year",
+    y = "Average Coefficient Value",
+    fill = "Feature"
+  ) +
+  geom_hline(yintercept = 0, color = "gray40", linetype = "dashed") +
+  theme_minimal(base_size = 13) +
+  theme(
+    legend.position = "right",
+    axis.text.x = element_text(angle = 0, hjust = 0.5),
+    panel.grid.major.y = element_line(linetype = "dashed", color = "gray80"),
+    plot.title = element_text(hjust = 0.5, color = "black", face = "bold")
+  )
+```
+
+### Wald's Test
+
+This test helps us understand which **groups of features** (like origin airport, carrier, or departure time) are most useful in predicting flight diversions.
+
+- Groups similar features together (e.g., all destinations or carriers)
+- Adds up the scores for each group to measure its overall importance
+- Calculates a **p-value** to show how statistically significant each group is:
+  - **Smaller p-value = more important**
+
+```{r grouped-wald-clean, message=FALSE, warning=FALSE}
+coefs <- summary(model)$coefficients
+
+wald_df <- data.frame(
+  term = rownames(coefs),
+  estimate = coefs[, "Estimate"],
+  std_error = coefs[, "Std. Error"]
+) %>%
+  mutate(
+    chi2 = (estimate / std_error)^2,
+    group = gsub("([A-Z]+$|[0-9]+$)", "", term)
+  )
+
+grouped_wald <- wald_df %>%
+  group_by(group) %>%
+  summarise(
+    chi2 = sum(chi2),
+    p_value = pchisq(sum(chi2), df = n(), lower.tail = FALSE)
+  ) %>%
+  arrange(p_value)
+
+# Save and print the kable output just once
+wald_table <- knitr::kable(grouped_wald, caption = "📊 Grouped Wald's Test Summary")
+print(wald_table)
+
+```
+### Deleting Cleaned CSV Files (2000–2004)
+
+This code helps clean up temporary files that were created earlier during data processing.
+
+- Makes a list of files to delete (e.g., `2000_Q2C.csv` to `2004_Q2C.csv`)
+- Shows the list so you can double-check
+- Asks for confirmation before deleting:
+  - Type **Y** to delete the files
+  - Type **N** to cancel
+
+```{r message=FALSE, warning=FALSE}
+# Generate list of file names
+years <- 2000:2004
+csv_files <- paste0(years, "_Q2C.csv")
+
+# Show list of files to delete
+cat("Files to be deleted:\n")
+print(csv_files)
+
+# Prompt for user confirmation
+confirmation <- tolower(readline(prompt = "Do you want to delete the above files? (Y/N): "))
+
+while (confirmation != "y") {
+  if (confirmation == "n") {
+    cat("Deletion cancelled. Run the chunk again to retry. Thank you.\n")
+    break
+  } else {
+    confirmation <- tolower(readline(prompt = "Invalid input. Please enter 'Y' or 'N': "))
+  }
+}
+
+# Delete files if confirmed
+if (confirmation == "y") {
+  for (file in csv_files) {
+    if (file.exists(file)) {
+      file.remove(file)
+      cat("Deleted:", file, "\n")
+    } else {
+      cat("File not found:", file, "\n")
+    }
+  }
+  cat("Task completed! Cleaned files deleted.\n")
+}
+```
+
+
+
+
+
+
